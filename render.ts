@@ -327,20 +327,21 @@ const frag_depth = `
 const vert_drape = `
     precision highp float;
     uniform mat4 u_projection;
+    uniform vec2 u_map_max;
     in vec2 a_xy;
     in vec2 a_em;
     out vec2 v_em, v_uv, v_xy;
     out float v_z;
     void main() {
         v_em = a_em;
-        vec2 xy_clamped = clamp(a_xy, vec2(0, 0), vec2(1000, 1000));
+        vec2 xy_clamped = clamp(a_xy, vec2(0, 0), u_map_max);
         v_z = max(0.0, a_em.x); // oceans with e<0 still rendered at z=0
         if (xy_clamped != a_xy) { // boundary points
             v_z = -0.5;
             v_em = vec2(0.0, 0.0);
         }
         vec4 pos = vec4(u_projection * vec4(xy_clamped, v_z, 1));
-        v_uv = a_xy / 1000.0;
+        v_uv = a_xy / u_map_max;
         v_xy = (1.0 + pos.xy) * 0.5;
         gl_Position = pos;
     }`;
@@ -450,10 +451,15 @@ const frag_final = `
 //////////////////////////////////////////////////////////////////////
 // Mapgen4 renderer
 
-const fbo_texture_size: number = 2048;
+const FBO_MAX_SIZE: number = 4096;
 
 export default class Renderer {
     numRiverTriangles: number = 0;
+
+    mapWidth: number;
+    mapHeight: number;
+    fbo_w: number;
+    fbo_h: number;
 
     topdown: mat4;
     projection: mat4;
@@ -469,6 +475,7 @@ export default class Renderer {
     screenshotCallback: () => void;
     renderParam: any;
 
+    canvas: HTMLCanvasElement;
     webgl: WebGLWrapper;
 
     texture_colormap: Texture;
@@ -490,15 +497,21 @@ export default class Renderer {
     buffer_quad_elements: Buffer;
     buffer_river_xyww: Buffer;
 
-    constructor (mesh: Mesh) {
-        const canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
+    constructor (canvas: HTMLCanvasElement, mesh: Mesh, mapWidth: number, mapHeight: number, xOffset: number = 0, fboSize: number = FBO_MAX_SIZE) {
+        this.mapWidth = mapWidth;
+        this.mapHeight = mapHeight;
+        this.fbo_w = fboSize;
+        this.fbo_h = Math.round(fboSize * mapHeight / mapWidth);
+
+        this.canvas = canvas;
         this.webgl = new WebGLWrapper(canvas);
 
         this.resizeCanvas();
 
         this.topdown = mat4.create();
         mat4.translate(this.topdown, this.topdown, [-1, -1, 0]);
-        mat4.scale(this.topdown, this.topdown, [1/500, 1/500, 1]);
+        mat4.scale(this.topdown, this.topdown, [2/mapWidth, 2/mapHeight, 1]);
+        if (xOffset !== 0) mat4.translate(this.topdown, this.topdown, [-xOffset, 0, 0]);
 
         this.projection = mat4.create();
         this.inverse_projection = mat4.create();
@@ -526,10 +539,10 @@ export default class Renderer {
 
         this.texture_colormap = this.webgl.createTexture({data: colormap.data, width: colormap.width, height: colormap.height, filter: 'nearest'});
 
-        this.fbo_land  = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
-        this.fbo_depth = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'}); // NOTE: linear requires adjusting parameters
-        this.fbo_river = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: false, filter: 'linear'}); // linear makes rivers look better
-        this.fbo_drape = this.webgl.createFramebuffer(fbo_texture_size, fbo_texture_size, {depth: true, filter: 'linear'}); // linear to smooth out edges
+        this.fbo_land  = this.webgl.createFramebuffer(this.fbo_w, this.fbo_h, {depth: false, internalFormat: this.webgl.gl.R16F, filter: 'linear'});
+        this.fbo_depth = this.webgl.createFramebuffer(this.fbo_w, this.fbo_h, {depth: true, internalFormat: this.webgl.gl.R16F, filter: 'nearest'}); // NOTE: linear requires adjusting parameters
+        this.fbo_river = this.webgl.createFramebuffer(this.fbo_w, this.fbo_h, {depth: false, filter: 'linear'}); // linear makes rivers look better
+        this.fbo_drape = this.webgl.createFramebuffer(this.fbo_w, this.fbo_h, {depth: true, filter: 'linear'}); // linear to smooth out edges
 
         this.program_river = this.webgl.createProgram('river', vert_river, frag_river, (gl, program) => {
             this.buffer_river_xyww.vertexAttribPointer(program.a_xyww, 4, gl.FLOAT, false, 0, 0);
@@ -554,8 +567,8 @@ export default class Renderer {
         });
 
         this.screenshotCanvas = document.createElement('canvas');
-        this.screenshotCanvas.width = fbo_texture_size;
-        this.screenshotCanvas.height = fbo_texture_size;
+        this.screenshotCanvas.width = this.fbo_w;
+        this.screenshotCanvas.height = this.fbo_h;
         this.screenshotCallback = null;
 
         this.renderParam = undefined;
@@ -586,13 +599,12 @@ export default class Renderer {
 
     /* Allow drawing at a different resolution than the internal texture size */
     resizeCanvas() {
-        let canvas = document.getElementById('mapgen4') as HTMLCanvasElement;
-        let size = canvas.clientWidth;
-        size = 2048; /* could be smaller to increase performance */
-        if (canvas.width !== size || canvas.height !== size) {
-            console.log(`Resizing canvas from ${canvas.width}x${canvas.height} to ${size}x${size}`);
-            canvas.width = canvas.height = size;
-            this.webgl.gl.viewport(0, 0, canvas.width, canvas.height);
+        const canvas = this.canvas;
+        if (canvas.width !== this.fbo_w || canvas.height !== this.fbo_h) {
+            console.log(`Resizing canvas from ${canvas.width}x${canvas.height} to ${this.fbo_w}x${this.fbo_h}`);
+            canvas.width = this.fbo_w;
+            canvas.height = this.fbo_h;
+            this.webgl.gl.viewport(0, 0, this.fbo_w, this.fbo_h);
         }
     }
 
@@ -642,6 +654,7 @@ export default class Renderer {
         const light_angle_rad = Math.PI / 180 * (renderParam.light_angle_deg + renderParam.rotate_deg);
         this.drawGeneric(this.program_drape, this.fbo_drape, (gl, program) => {
             gl.uniformMatrix4fv(program.u_projection, false, this.projection);
+            gl.uniform2fv(program.u_map_max, [this.mapWidth, this.mapHeight]);
             gl.uniform2fv(program.u_light_angle, [Math.cos(light_angle_rad), Math.sin(light_angle_rad)]);
             gl.uniform2fv(program.u_inverse_texture_size, [1.5 / this.fbo_drape.texture.width, 1.5 / this.fbo_drape.texture.height]);
             gl.uniform1f(program.u_slope, renderParam.slope);
@@ -713,7 +726,8 @@ export default class Renderer {
             this.projection[9] = 1;
 
             /* Scale and translate works on the hybrid this.projection */
-            mat4.scale(this.projection, this.projection, [renderParam.zoom/100, renderParam.zoom/100, renderParam.mountain_height * renderParam.zoom/100]);
+            const aspectScale = this.mapHeight / this.mapWidth;
+            mat4.scale(this.projection, this.projection, [renderParam.zoom/100 * aspectScale, renderParam.zoom/100, renderParam.mountain_height * renderParam.zoom/100]);
             mat4.translate(this.projection, this.projection, [-renderParam.x, -renderParam.y, 0]);
 
             /* Keep track of the inverse matrix for mapping mouse to world coordinates */
@@ -726,7 +740,7 @@ export default class Renderer {
             this.drawDrape(renderParam);
 
             /* Draw the final texture to the canvas; this slightly blurs the outlines */
-            this.drawFinal([0.5 / fbo_texture_size, 0.5 / fbo_texture_size]);
+            this.drawFinal([0.5 / this.fbo_w, 0.5 / this.fbo_h]);
 
             if (this.screenshotCallback) {
                 const ctx = this.screenshotCanvas.getContext('2d');
@@ -754,5 +768,46 @@ export default class Renderer {
 
     updateView(renderParam: any) {
         this.renderParam = renderParam;
+    }
+
+    /** Render the full map top-down to fbo_drape and read pixels directly for download */
+    renderForDownload(renderParam: any) {
+        const {gl} = this.webgl;
+
+        this.fbo_river.clear(0, 0, 0, 0);
+        this.fbo_depth.clear(0, 0, 0, 1);
+        this.fbo_drape.clear(0.3, 0.3, 0.35, 1);
+
+        if (this.numRiverTriangles > 0) this.drawRivers();
+        this.drawLand(renderParam.outline_water);
+
+        // Use topdown projection so the full map fills the image without grey background
+        const savedProjection = mat4.clone(this.projection);
+        mat4.copy(this.projection, this.topdown);
+        if (renderParam.outline_depth > 0) this.drawDepth();
+        this.drawDrape(renderParam);
+        mat4.copy(this.projection, savedProjection);
+
+        // Read pixels from fbo_drape (WebGL y-axis is bottom-up, flip rows)
+        this.fbo_drape.bind();
+        const w = this.fbo_w, h = this.fbo_h;
+        this.screenshotCanvas.width = w;
+        this.screenshotCanvas.height = h;
+        const buffer = new Uint8Array(4 * w * h);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
+        const ctx = this.screenshotCanvas.getContext('2d');
+        const imageData = ctx.createImageData(w, h);
+        const bytesPerRow = 4 * w;
+        for (let y = 0; y < h; y++) {
+            imageData.data.set(new Uint8Array(buffer.buffer, y * bytesPerRow, bytesPerRow), (h - y - 1) * bytesPerRow);
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        if (this.screenshotCallback) {
+            this.screenshotCallback();
+            this.screenshotCallback = null;
+        }
     }
 }

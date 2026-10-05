@@ -20,6 +20,7 @@ const CANVAS_SIZE = 128;
 const currentStroke = {
     /* elevation before the current paint stroke began */
     previousElevation: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
+    previousMoisture: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
     /* how long, in milliseconds, was spent painting */
     time: new Float32Array(CANVAS_SIZE * CANVAS_SIZE),
     /* maximum strength applied */
@@ -33,9 +34,11 @@ class Generator {
     island = 0;
     userHasPainted = false;
     elevation: Float32Array;
-    
+    moistureConstraints: Float32Array;
+
     constructor () {
         this.elevation = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
+        this.moistureConstraints = new Float32Array(CANVAS_SIZE * CANVAS_SIZE);
     }
 
     setElevationParam(elevationParam) {
@@ -86,17 +89,18 @@ class Generator {
             }
         }
 
+        this.moistureConstraints.fill(0);
         this.userHasPainted = false;
     }
 
     /**
      * Paint a circular region. x0, y0 should be 0 to 1
      */
-    paintAt(tool: { elevation: number; },
+    paintAt(tool: { elevation: number; forceDry?: boolean },
             x0: number, y0: number,
             size: { innerRadius: number; outerRadius: number; rate: number; },
             deltaTimeInMs: number) {
-        let {elevation} = this;
+        let {elevation, moistureConstraints} = this;
         /* This has two effects: first time you click the mouse it has a
          * strong effect, and it also limits the amount in case you
          * pause */
@@ -122,6 +126,9 @@ class Generator {
                 }
                 let mix = currentStroke.strength[p] * Math.min(1, currentStroke.time[p]);
                 elevation[p] = (1 - mix) * currentStroke.previousElevation[p] + mix * newElevation;
+                moistureConstraints[p] = tool.forceDry
+                    ? (1 - mix) * currentStroke.previousMoisture[p] + mix * 1.0
+                    : (1 - mix) * currentStroke.previousMoisture[p];
             }
         }
 
@@ -135,6 +142,9 @@ let exported = {
     onUpdate: () => {},
     screenToWorldCoords: coords => coords,
     constraints: heightMap.elevation,
+    moistureConstraints: heightMap.moistureConstraints,
+    brushSizeMultiplier: 1,
+    brushRateMultiplier: 1,
     setElevationParam: elevationParam => heightMap.setElevationParam(elevationParam),
     userHasPainted: () => heightMap.userHasPainted,
 };
@@ -147,17 +157,18 @@ document.getElementById('button-reset').addEventListener('click', () => {
 
 const SIZES = {
     // rate is effect per second
-    tiny:   {key: '1', rate: 9, innerRadius: 1.5, outerRadius: 2.5},
-    small:  {key: '2', rate: 8, innerRadius: 2, outerRadius: 6},
-    medium: {key: '3', rate: 5, innerRadius: 5, outerRadius: 10},
-    large:  {key: '4', rate: 3, innerRadius: 10, outerRadius: 16},
+    tiny:   {key: '1', rate: 5, innerRadius: 1,   outerRadius: 2},
+    small:  {key: '2', rate: 4, innerRadius: 1.5, outerRadius: 4},
+    medium: {key: '3', rate: 3, innerRadius: 3,   outerRadius: 7},
+    large:  {key: '4', rate: 2, innerRadius: 6,   outerRadius: 12},
 };
 
 const TOOLS = {
-    ocean:    {elevation: -0.25},
-    shallow:  {elevation: -0.05},
-    valley:   {elevation: +0.05},
-    mountain: {elevation: +1.0},
+    ocean:    {elevation: -0.25, forceDry: false},
+    shallow:  {elevation: -0.05, forceDry: false},
+    valley:   {elevation: +0.05, forceDry: false},
+    mountain: {elevation: +1.0,  forceDry: false},
+    desert:   {elevation: +0.12, forceDry: true},
 };
 
 let currentTool = 'mountain';
@@ -181,6 +192,7 @@ const controls: [string, string, () => void][] = [
     ['w', "shallow",  () => { currentTool = 'shallow'; }],
     ['e', "valley",   () => { currentTool = 'valley'; }],
     ['r', "mountain", () => { currentTool = 'mountain'; }],
+    ['t', "desert",   () => { currentTool = 'desert'; }],
 ];
 
 window.addEventListener('keydown', e => {
@@ -195,20 +207,20 @@ for (let control of controls) {
 displayCurrentTool();
 
 
-function setUpPaintEventHandling() {
-    const el = document.getElementById('mapgen4');
+function setUpPaintEventHandling(el: HTMLElement, coordsTransform?: (coords: [number, number]) => [number, number]) {
     let dragging = false;
     let timestamp = 0;
-    
+
     function start(event: PointerEvent) {
         if (event.button !== 0) return; // left button only
         el.setPointerCapture(event.pointerId);
-        
+
         dragging = true;
         timestamp = Date.now();
         currentStroke.time.fill(0);
         currentStroke.strength.fill(0);
         currentStroke.previousElevation.set(heightMap.elevation);
+        currentStroke.previousMoisture.set(heightMap.moistureConstraints);
         move(event);
     }
 
@@ -221,21 +233,20 @@ function setUpPaintEventHandling() {
 
         const nowMs = Date.now();
         const bounds = el.getBoundingClientRect();
-        let coords = [
+        let coords: [number, number] = [
             (event.x - bounds.left) / bounds.width,
             (event.y - bounds.top) / bounds.height,
         ];
-        coords = exported.screenToWorldCoords(coords);
-        let brushSize = SIZES[currentSize];
+        coords = (coordsTransform ?? exported.screenToWorldCoords)(coords);
+        const sm = exported.brushSizeMultiplier;
+        const rm = exported.brushRateMultiplier;
+        let brushSize = {
+            ...SIZES[currentSize],
+            innerRadius: SIZES[currentSize].innerRadius * sm,
+            outerRadius: SIZES[currentSize].outerRadius * sm,
+            rate: SIZES[currentSize].rate * rm,
+        };
         if (event.pointerType === 'pen' && event.pressure !== 0.5) {
-            // Pointer Event spec says 0.5 sent when pen does not
-            // support pressure; I primarily added this for Apple
-            // Pencil but haven't tested on others. I want pressure
-            // 0.25 to correspond to "regular" pressure for the given
-            // brush size, so radius should be 1.0. I am *not*
-            // currently supporting Macbook pressure-sensitive
-            // touchpads, which don't show up under Pointer Events.
-            // https://developer.mozilla.org/en-US/docs/Web/API/Force_Touch_events
             let radius = 2 * Math.sqrt(event.pressure);
             brushSize = {
                 key: brushSize.key,
@@ -245,7 +256,6 @@ function setUpPaintEventHandling() {
             };
         }
         if (event.shiftKey) {
-            // Hold down shift to paint slowly
             brushSize = {...brushSize, rate: brushSize.rate/4};
         }
         heightMap.paintAt(TOOLS[currentTool], coords[0], coords[1],
@@ -253,15 +263,41 @@ function setUpPaintEventHandling() {
         timestamp = nowMs;
         exported.onUpdate();
     }
-        
+
     el.addEventListener('pointerdown', start);
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
-    el.addEventListener('pointermove', move)
+    el.addEventListener('pointermove', move);
     el.addEventListener('touchstart', (e) => e.preventDefault()); // prevent scroll
 }
-setUpPaintEventHandling();
+setUpPaintEventHandling(document.getElementById('mapgen4'));
 
+exported['addPaintCanvas'] = (el: HTMLElement, coordsTransform: (coords: [number, number]) => [number, number]) => {
+    setUpPaintEventHandling(el, coordsTransform);
+};
 
+exported['getState'] = () => ({
+    constraints: Array.from(heightMap.elevation),
+    moistureConstraints: Array.from(heightMap.moistureConstraints),
+    userHasPainted: heightMap.userHasPainted,
+});
+
+exported['loadState'] = (state: {constraints: number[], moistureConstraints: number[], userHasPainted: boolean, seed: number, island: number}) => {
+    if (state.userHasPainted) {
+        heightMap.elevation.set(state.constraints);
+        heightMap.moistureConstraints.set(state.moistureConstraints);
+        heightMap.userHasPainted = true;
+        // Sync seed/island so setElevationParam won't overwrite the loaded constraints
+        heightMap.seed = state.seed;
+        heightMap.island = state.island;
+    }
+};
+
+/* Set elevation constraints from an external Float32Array (e.g. batch image processing) */
+exported['setConstraints'] = (elevationData: Float32Array) => {
+    heightMap.elevation.set(elevationData);
+    heightMap.moistureConstraints.fill(0);
+    heightMap.userHasPainted = true;
+};
 
 export default exported;

@@ -36,11 +36,11 @@ export type PointsData = {
         
 
  */
-export function choosePoints(seed: number, spacing: number, mountainSpacing: number): PointsData {
+export function choosePoints(seed: number, spacing: number, mountainSpacing: number, mapWidth = 1000, mapHeight = 1000): PointsData {
     // Generate both interior and exterior boundary points; see
     // https://www.redblobgames.com/x/2314-poisson-with-boundary/
     const boundarySpacing = spacing * Math.sqrt(2);
-    const bounds = {left: 0, top: 0, width: 1000, height: 1000}; // left,top must be 0 for poisson
+    const bounds = {left: 0, top: 0, width: mapWidth, height: mapHeight}; // left,top must be 0 for poisson
     let interiorBoundaryPoints = generateInteriorBoundaryPoints(bounds, boundarySpacing);
     let exteriorBoundaryPoints = generateExteriorBoundaryPoints(bounds, boundarySpacing);
     

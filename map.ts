@@ -57,7 +57,7 @@ function calculateMountainDistance(mesh: Mesh, t_peaks: number[], spacing: numbe
 /**
  * Save noise values in arrays.
  */
-function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNoise {
+function precalculateNoise(randFloat: () => number, mesh: Mesh, mapWidth: number, mapHeight: number): PrecalculatedNoise {
     const noise2D = createNoise2D(randFloat);
     let {numTriangles} = mesh;
     let noise0_t = new Float32Array(numTriangles),
@@ -67,8 +67,8 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNo
         noise5_t = new Float32Array(numTriangles),
         noise6_t = new Float32Array(numTriangles);
     for (let t = 0; t < numTriangles; t++) {
-        let nx = (mesh.x_of_t(t)-500) / 500,
-            ny = (mesh.y_of_t(t)-500) / 500;
+        let nx = (mesh.x_of_t(t) - mapWidth/2) / (mapWidth/2),
+            ny = (mesh.y_of_t(t) - mapHeight/2) / (mapHeight/2);
         noise0_t[t] = noise2D(nx, ny);
         noise1_t[t] = noise2D(2*nx + 5, 2*ny + 5);
         noise2_t[t] = noise2D(4*nx + 7, 4*ny + 7);
@@ -80,9 +80,22 @@ function precalculateNoise(randFloat: () => number, mesh: Mesh): PrecalculatedNo
 }
 
 
+/** Bilinear interpolation into a square constraint grid */
+function bilinearConstraintAt(data: Float32Array, size: number, x: number, y: number): number {
+    x = clamp(x * (size-1), 0, size-2);
+    y = clamp(y * (size-1), 0, size-2);
+    let xInt = Math.floor(x), yInt = Math.floor(y);
+    let xFrac = x - xInt, yFrac = y - yInt;
+    let p = size * yInt + xInt;
+    return ((data[p]      * (1-xFrac) + data[p+1]      * xFrac) * (1-yFrac)
+          + (data[p+size] * (1-xFrac) + data[p+size+1] * xFrac) * yFrac);
+}
+
 export default class Map {
     seed: number = -1;
     spacing: number;
+    mapWidth: number;
+    mapHeight: number;
     precomputed: PrecalculatedNoise;
     mountainJaggedness: number = -Infinity;
     windAngleDeg: number = Infinity;
@@ -101,6 +114,8 @@ export default class Map {
 
     constructor (public mesh: Mesh, public t_peaks: number[], param: any) {
         this.spacing = param.spacing;
+        this.mapWidth  = param.mapWidth  || 1000;
+        this.mapHeight = param.mapHeight || 1000;
         this.elevation_t         = new Float32Array(mesh.numTriangles);
         this.elevation_r         = new Float32Array(mesh.numRegions);
         this.humidity_r          = new Float32Array(mesh.numRegions);
@@ -129,30 +144,8 @@ export default class Map {
         // the bounding box of the painted area, or maybe send the
         // drawing positions and parameters and let the painting happen
         // in this thread.
-        function constraintAt(x: number, y: number): number {
-            // https://en.wikipedia.org/wiki/Bilinear_interpolation
-            const C = constraints.constraints, size = constraints.size;
-            // NOTE: there's a tricky "off by one" problem here. Since
-            // x can be from 0.000 to 0.999, and I want xInt+1 < size
-            // to leave one extra tile for bilinear filtering, that
-            // means I want xInt < size-1. So I need to multiply x and
-            // y by size-1, not by size.
-            x = clamp(x * (size-1), 0, size-2);
-            y = clamp(y * (size-1), 0, size-2);
-            let xInt = Math.floor(x),
-                yInt = Math.floor(y),
-                xFrac = x - xInt,
-                yFrac = y - yInt;
-            let p = size * yInt + xInt;
-            let e00 = C[p],
-            e01 = C[p + 1],
-            e10 = C[p + size],
-            e11 = C[p + size + 1];
-            return ((e00 * (1 - xFrac) + e01 * xFrac) * (1 - yFrac)
-                + (e10 * (1 - xFrac) + e11 * xFrac) * yFrac);
-        }
         for (let t = 0; t < numSolidTriangles; t++) {
-            let e = constraintAt(mesh.x_of_t(t)/1000, mesh.y_of_t(t)/1000);
+            let e = bilinearConstraintAt(constraints.constraints, constraints.size, mesh.x_of_t(t)/this.mapWidth, mesh.y_of_t(t)/this.mapHeight);
             // TODO: e*e*e*e seems too steep for this, as I want this
             // to apply mostly at the original coastlines and not
             // elsewhere
@@ -232,14 +225,14 @@ export default class Map {
         if (this.seed !== elevationParam.seed) {
             // TODO: function should reuse existing arrays
             this.seed = elevationParam.seed;
-            this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh);
+            this.precomputed = precalculateNoise(makeRandFloat(elevationParam.seed), this.mesh, this.mapWidth, this.mapHeight);
         }
 
         this.assignTriangleElevation(elevationParam, constraints);
         this.assignRegionElevation();
     }
 
-    assignRainfall(biomesParam) {
+    assignRainfall(biomesParam, constraints?: { moistureConstraints: Float32Array; size: number }) {
         const {mesh, r_wind_order, wind_sort_r, humidity_r, rainfall_r, elevation_r} = this;
         const {numRegions, _s_of_r, _halfedges} = mesh;
 
@@ -286,6 +279,20 @@ export default class Map {
             }
             rainfall_r[r] = rainfall;
             humidity_r[r] = humidity;
+        }
+
+        // Apply moisture constraints (desert brush forces dryness)
+        if (constraints?.moistureConstraints) {
+            const {moistureConstraints, size} = constraints;
+            for (let r = 0; r < numRegions; r++) {
+                if (elevation_r[r] > 0) {
+                    const dry = bilinearConstraintAt(moistureConstraints, size, mesh.x_of_r(r)/this.mapWidth, mesh.y_of_r(r)/this.mapHeight);
+                    if (dry > 0) {
+                        rainfall_r[r] *= Math.max(0, 1 - dry);
+                        humidity_r[r] *= Math.max(0, 1 - dry);
+                    }
+                }
+            }
         }
     }
 

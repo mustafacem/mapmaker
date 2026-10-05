@@ -11,10 +11,13 @@ import param from "./config.js";
 import {choosePoints} from "./generate-points.ts";
 import {toPointsFile} from "./serialize-points.ts";
 
-function main() {
+function generate(mapWidth: number, mapHeight: number) {
     let p = choosePoints(
-        param.mesh.seed, param.spacing, param.mountainSpacing);
-    fs.writeFileSync(`build/points-${param.spacing}.data`, toPointsFile(p));
+        param.mesh.seed, param.spacing, param.mountainSpacing, mapWidth, mapHeight);
+    const filename = `build/points-${param.spacing}-${mapWidth}x${mapHeight}.data`;
+    fs.writeFileSync(filename, toPointsFile(p));
+    console.log(`Generated ${filename} (${p.points.length} points)`);
 }
 
-main()
+generate(1000, 1000);
+generate(2000, 1000);

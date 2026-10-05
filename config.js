@@ -9,8 +9,8 @@
  */
 
 export default {
-    spacing: 5.5,
-    mountainSpacing: 35,
+    spacing: 2.0,
+    mountainSpacing: 13,
     mesh: {
         seed: 12345,
     },

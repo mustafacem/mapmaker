@@ -46,7 +46,7 @@ let handler = (event) => {
         
         if (run.biomes) {
             map.assignElevation(param.elevation, constraints);
-            map.assignRainfall(param.biomes);
+            map.assignRainfall(param.biomes, constraints);
         }
         if (run.rivers) {
             map.assignRivers(param.rivers);
